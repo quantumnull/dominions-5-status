@@ -3,8 +3,7 @@ use serenity::prelude::Context;
 use serenity::model::channel::Message;
 use serenity::model::id::UserId;
 
-use model::{GameServer, GameServerState, LobbyState};
-use model::enums::Era;
+use model::*;
 use db::*;
 use super::alias_from_arg_or_channel_name;
 

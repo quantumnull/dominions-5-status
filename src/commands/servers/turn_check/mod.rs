@@ -1,14 +1,14 @@
 use typemap::ShareMap;
 
 use db::{DbConnection, DbConnectionKey};
-use model::{GameServer, GameServerState, Player, Nation};
-use model::enums::{NationStatus, SubmissionStatus, Nations};
+use model::*;
 use std::{thread, time};
 use serenity::prelude::Mutex;
 use failure::{err_msg, Error};
 use server::ServerConnection;
 use std::error::Error as TraitError;
 use std::collections::HashMap;
+use itertools::Itertools;
 
 pub fn check_for_new_turns_every_1_min<C: ServerConnection>(mutex: &Mutex<ShareMap>) {
     loop {
@@ -38,7 +38,7 @@ pub(crate) fn message_players_if_new_turn<C: ServerConnection>(
 
 struct NewTurnNation {
     player: Player,
-    nation_id: usize,
+    nation_id: u32,
 }
 
 use server::cache_get;
@@ -47,9 +47,9 @@ use model::GameData;
 struct NewTurnResult {
     nations_to_notify: Vec<NewTurnNation>,
     new_turn_number: i32,
-    ai_this_turn: Vec<usize>,
-    defeated_this_turn: Vec<usize>,
-    possible_stalls: Vec<usize>,
+    ai_this_turn: Vec<u32>,
+    defeated_this_turn: Vec<u32>,
+    possible_stalls: Vec<u32>,
 }
 
 // For a given `GameServer`, if it's started then get game state, and compare it to
@@ -69,7 +69,7 @@ fn check_server_for_new_turn_helper<C: ServerConnection>(
         let new_turn_no = new_data.turn;
         let db_found_new_turn = db_conn.update_game_with_possibly_new_turn(&server.alias, new_turn_no)?;
         if !db_found_new_turn { return Err(err_msg(format!("cache and db disagree game {}", server.alias))); }
-        let players_nations = db_conn.players_with_nations_for_game_alias(&server.alias)?;
+        let players_nations = db_conn.players_with_nation_ids_for_game_alias(&server.alias)?;
         if let Some(old_data) = option_old_data {
             Ok(Some(
                 new_turn_from_old(old_data, &players_nations, new_data)
@@ -84,9 +84,9 @@ fn check_server_for_new_turn_helper<C: ServerConnection>(
     }
 }
 
-fn new_turn_from_old(old: GameData, players_nations: &Vec<(Player, usize)>,  new: GameData) -> NewTurnResult {
-    let old_ai_nation_ids = old.nations.iter().filter(|&n| n.status == NationStatus::AI).map(|ref n| n.id).collect::<Vec<usize>>();
-    let mut new_ai_nation_ids = new.nations.iter().filter(|&n| n.status == NationStatus::AI).map(|ref n| n.id).collect::<Vec<usize>>();
+fn new_turn_from_old(old: GameData, players_nations: &Vec<(Player, u32)>,  new: GameData) -> NewTurnResult {
+    let old_ai_nation_ids = old.nations.iter().filter(|&n| n.status == NationStatus::AI).map(|ref n| n.nation.id).collect::<Vec<_>>();
+    let mut new_ai_nation_ids = new.nations.iter().filter(|&n| n.status == NationStatus::AI).map(|ref n| n.nation.id).collect::<Vec<_>>();
     new_ai_nation_ids.retain(|ref n| old_ai_nation_ids.contains(n));
 
     let not_submitted_nation_ids = if old.turn + 1 == new.turn && old.turn_timer <= 60 * 1000 {
@@ -94,7 +94,7 @@ fn new_turn_from_old(old: GameData, players_nations: &Vec<(Player, usize)>,  new
             .filter(|&n|
                 n.submitted == SubmissionStatus::NotSubmitted
                     || n.submitted == SubmissionStatus::PartiallySubmitted)
-            .map(|ref n| n.id).collect::<Vec<usize>>()
+            .map(|ref n| n.nation.id).collect::<Vec<u32>>()
     } else {
         Vec::new()
     };
@@ -104,36 +104,36 @@ fn new_turn_from_old(old: GameData, players_nations: &Vec<(Player, usize)>,  new
     new_turn_nations
 }
 
-fn new_turn_from(players_nations: &Vec<(Player, usize)>,  game_data: GameData) -> NewTurnResult {
+fn new_turn_from(players_nations: &Vec<(Player, u32)>,  game_data: GameData) -> NewTurnResult {
     let mut ret = Vec::new();
     let new_turn_number = game_data.turn;
 
-    let game_data_nations_by_id: HashMap<usize, Nation> = {
+    let game_data_nations_by_id: HashMap<u32, Nation> = {
         let mut hm = HashMap::new();
-        for nation in game_data.nations {
-            if (nation.status == NationStatus::Human
-                && nation.submitted == SubmissionStatus::NotSubmitted)
-                || nation.status == NationStatus::DefeatedThisTurn
+        for nation_details in game_data.nations {
+            if (nation_details.status == NationStatus::Human
+                && nation_details.submitted == SubmissionStatus::NotSubmitted)
+                || nation_details.status == NationStatus::DefeatedThisTurn
                 {
-                    hm.insert(nation.id, nation);
+                    hm.insert(nation_details.nation.id, nation_details.nation);
                 }
         }
         hm
     };
     for &(ref player, nation_id) in players_nations {
         if player.turn_notifications {
-            if let Some(nation) = game_data_nations_by_id.get(&nation_id)
+            if let Some(_) = game_data_nations_by_id.get(&nation_id)
                 {
                     ret.push(NewTurnNation{
                         player: player.clone(),
-                        nation_id: nation_id,
+                        nation_id,
                     });
                 }
         }
     }
     NewTurnResult {
         nations_to_notify: ret,
-        new_turn_number: new_turn_number,
+        new_turn_number,
         ai_this_turn: Vec::new(),
         defeated_this_turn: Vec::new(), // FIXME
         possible_stalls: Vec::new(),
@@ -185,19 +185,17 @@ fn check_server_for_new_turn<C: ServerConnection>(
     Ok(())
 }
 
-fn nation_ids_to_comma_name_list(ids: &[usize]) -> String {
+fn nation_ids_to_comma_name_list(ids: &[u32]) -> String {
     if ids.is_empty() {
         "<none>".to_owned()
     } else {
-        let mut text = {
-            let &(name, era) = Nations::get_nation_desc(ids[0]);
-            format!("{} {} ({})", era, name, ids[0])
-        };
-
-        for &nation_id in &ids[1..] {
-            let &(name, era) = Nations::get_nation_desc(nation_id);
-            text.push_str(&format!(", {} {} ({})", era, name, nation_id));
-        }
-        text
+        ids
+            .into_iter()
+            .map(|&nation_id| {
+                let &(name, era) = Nations::get_nation_desc(nation_id);
+                format!("{} {} ({})", era, name, nation_id)
+            })
+            .intersperse(", ".to_owned())
+            .collect::<String>()
     }
 }

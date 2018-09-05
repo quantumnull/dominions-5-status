@@ -25,4 +25,8 @@ impl SubmissionStatus {
             _ => SubmissionStatus::Unknown(x),
         }
     }
+
+    pub fn from_bool(x: bool) -> Self {
+        if x { SubmissionStatus::Submitted } else { SubmissionStatus::NotSubmitted }
+    }
 }

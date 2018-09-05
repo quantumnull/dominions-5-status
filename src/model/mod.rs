@@ -1,4 +1,5 @@
-pub mod enums;
+mod enums;
+pub use self::enums::*;
 
 mod nation;
 pub use self::nation::*;
@@ -14,3 +15,4 @@ pub use self::player::*;
 
 mod game_server;
 pub use self::game_server::*;
+

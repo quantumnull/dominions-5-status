@@ -5,8 +5,7 @@ use flate2::read::ZlibDecoder;
 use std::io::{Cursor, Read, Write};
 use std::io;
 use std::net;
-use model::{GameData, Nation, RawGameData};
-use model::enums::{NationStatus, Nations, SubmissionStatus};
+use model::*;
 
 pub trait ServerConnection {
     fn get_game_data(server_address: &str) -> io::Result<GameData>;
@@ -38,15 +37,17 @@ fn get_game_data_cache(server_address: &str) -> io::Result<GameData> {
         if status_num != 0 && status_num != 3 {
             let submitted = raw_data.f[i + 250];
             let connected = raw_data.f[i + 500];
-            let nation_id = i - 1; // why -1? No fucking idea
+            let nation_id = (i - 1) as u32; // why -1? No fucking idea
             let &(nation_name, era) = Nations::get_nation_desc(nation_id);
-            let nation = Nation {
-                id: nation_id,
+            let nation = NationDetails {
+                nation: Nation {
+                    id: nation_id,
+                    name: nation_name,
+                    era,
+                },
                 status: NationStatus::from_int(status_num),
                 submitted: SubmissionStatus::from_int(submitted),
                 connected: connected == 1,
-                name: nation_name.to_owned(),
-                era: format!("{}", era),
             };
             game_data.nations.push(nation);
         }

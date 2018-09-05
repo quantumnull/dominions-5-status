@@ -1,8 +1,6 @@
 use super::*;
 
 use model::*;
-use model::enums::*;
-use serenity::model::*;
 use serenity::model::id::UserId;
 
 #[test]

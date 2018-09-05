@@ -6,10 +6,11 @@ use serenity::prelude::Context;
 use serenity::model::channel::Message;
 use serenity::builder::CreateEmbed;
 
-use model::{GameServerState, LobbyState, StartedState};
-use model::enums::{NationStatus, Nations, SubmissionStatus};
+use model::*;
 use db::{DbConnection, DbConnectionKey};
 use std::collections::HashMap;
+use std::borrow::Cow;
+use either::Either;
 
 #[cfg(test)]
 mod tests;
@@ -65,22 +66,14 @@ fn lobby_details(
     alias: &str,
 ) -> Result<CreateEmbed, CommandError> {
     let embed_title = format!("{} ({} Lobby)", alias, lobby_state.era);
-    let players_nations = db_conn.players_with_nations_for_game_alias(&alias)?;
+    let players_nations =
+        db_conn.players_with_nations_for_game_alias(&alias)?;
     let registered_player_count = players_nations.len() as i32;
 
-    let mut player_names = String::new();
-    let mut nation_names = String::new();
+    let open_slots = lobby_state.player_count - registered_player_count;
+    let (player_names, nation_names) = players_nations_details(&mut players_nations.into_iter(), open_slots)?;
 
-    for (player, nation_id) in players_nations {
-        let &(nation_name, era) = Nations::get_nation_desc(nation_id);
-        player_names.push_str(&format!("{}\n", player.discord_user_id.get()?));
-        nation_names.push_str(&format!("{} {} ({})\n", era, nation_name, nation_id));
-    }
-    for _ in 0..(lobby_state.player_count - registered_player_count) {
-        player_names.push_str(&".\n");
-        nation_names.push_str(&"OPEN\n");
-    }
-    let owner = lobby_state.owner.get()?;
+    let owner = lobby_state.owner.to_user()?;
     let e_temp = CreateEmbed::default()
         .title(embed_title)
         .field("Nation", nation_names, true)
@@ -103,43 +96,21 @@ fn uploading_from_lobby_details<C: ServerConnection>(
     let ref server_address = started_state.address;
     let game_data = C::get_game_data(&server_address)?;
 
-    let players_uploaded_by_nation_id = {
-        let mut hash_map = HashMap::with_capacity(game_data.nations.len());
-        for nation in &game_data.nations {
-            let _ = hash_map.insert(nation.id, nation.clone());
-        }
-        hash_map
-    };
+    let players_with_nations_for_game_alias = db_conn.players_with_nation_ids_for_game_alias(alias)?;
+    let players = nation_list(
+        &players_with_nations_for_game_alias[..],
+        &game_data.nations[..],
+    );
 
-    let id_player_registered_nations = db_conn.players_with_nations_for_game_alias(&alias)?;
-    let players_not_uploaded = id_player_registered_nations
-        .iter()
-        .filter(|&&(_, nation_id)|
-            !players_uploaded_by_nation_id.contains_key(&nation_id)
-        );
-
-    let mut nation_names = String::new();
-    let mut player_names = String::new();
-    let mut submitted_status = String::new();
-
-    for (&nation_id, _) in players_uploaded_by_nation_id.iter() {
-        let player_name = id_player_registered_nations.iter()
-            .find(|&&(_, found_nation_id)| nation_id == found_nation_id)
-            .map(|&(ref p, _)|
-                     format!("**{}**\n", p.discord_user_id.get().unwrap()))
-            .unwrap_or_else(|| format!("{}\n", NationStatus::Human.show()));
-        let &(nation_name, era) = Nations::get_nation_desc(nation_id);
-        nation_names.push_str(&format!("{} {} ({})\n", era, nation_name, nation_id));
-        player_names.push_str(&player_name);
-        submitted_status.push_str(&format!("{}\n", SubmissionStatus::Submitted.show()));
-    }
-
-    for &(ref player, nation_id) in players_not_uploaded {
-        let &(nation_name, era) = Nations::get_nation_desc(nation_id);
-        nation_names.push_str(&format!("{} {}\n", era, nation_name));
-        player_names.push_str(&format!("**{}**\n", player.discord_user_id.get()?));
-        submitted_status.push_str(&format!("{}\n", SubmissionStatus::NotSubmitted.show()));
-    }
+    let (nation_names, player_names, submission_status) = game_details_embed(
+        &mut players.into_iter().map(|(nation, option_player, submitted)| {
+            let either_player: Either<&Player, NationStatus> = match option_player {
+                Some(player) => Either::left(&player),
+                None => Either::right(NationStatus::Human), // fixme
+            };
+            (nation, either_player, Some(SubmissionStatus::from_bool(submitted)))
+        })
+    )?;
 
     let embed_title = format!(
         "{} ({}): Pretender uploading",
@@ -147,15 +118,16 @@ fn uploading_from_lobby_details<C: ServerConnection>(
         started_state.address,
     );
 
-    let owner = lobby_state.owner.get()?;
+    let owner = lobby_state.owner.to_user()?;
     let e_temp = CreateEmbed::default()
         .title(embed_title)
         .field("Nation", nation_names, true)
         .field("Player", player_names, true)
-        .field("Uploaded", submitted_status, true)
+        .field("Uploaded", submission_status, true)
         .field("Owner", format!("{}", owner), false);
     let e = match lobby_state.description {
-        Some(ref description) if !description.is_empty() => e_temp.field("Description", description, false),
+        Some(ref description) if !description.is_empty() =>
+            e_temp.field("Description", description, false),
         _ => e_temp,
     };
     Ok(e)
@@ -171,35 +143,44 @@ fn started_from_lobby_details<C: ServerConnection>(
     let mut game_data = C::get_game_data(&server_address)?;
     game_data
         .nations
-        .sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        .sort_unstable_by(|a, b| a.nation.name.cmp(&b.nation.name));
 
-    let mut nation_names = String::new();
-    let mut player_names = String::new();
-    let mut submitted_status = String::new();
+    let id_player_nations = db_conn.players_with_nation_ids_for_game_alias(&alias)?;
 
-    let id_player_nations = db_conn.players_with_nations_for_game_alias(&alias)?;
+    let player_nations_submitted = player_list(
+        &id_player_nations[..],
+        &game_data.nations[..],
+    );
 
-    for nation in &game_data.nations {
-        debug!("Creating format for nation {} {}", nation.era, nation.name);
-        nation_names.push_str(&format!("{} {} ({})\n", nation.era, nation.name, nation.id));
+    let (nation_names, player_names, submitted_status) = game_details_embed(
+        &mut player_nations_submitted.into_iter().map(|(nation, player, submitted)|
+            (nation, player, Some(SubmissionStatus::from_bool(submitted)))
+        )
+    )?;
 
-        let nation_string = if let NationStatus::Human = nation.status {
+
+
+    for nation_details in &game_data.nations {
+        debug!("Creating format for nation {}", nation_details.nation);
+        nation_names.push_str(&format!("{}\n", nation_details.nation));
+
+        let nation_string = if let NationStatus::Human = nation_details.status {
             if let Some(&(ref player, _)) = id_player_nations
                 .iter()
-                .find(|&&(_, nation_id)| nation_id == nation.id)
+                .find(|&&(_, nation_id)| nation_id == nation_details.nation.id)
             {
-                format!("**{}**", player.discord_user_id.get()?)
+                format!("**{}**", player.discord_user_id.to_user()?)
             } else {
-                nation.status.show().to_string()
+                nation_details.status.show().to_string()
             }
         } else {
-            nation.status.show().to_string()
+            nation_details.status.show().to_string()
         };
 
         player_names.push_str(&format!("{}\n", nation_string));
 
-        if let NationStatus::Human = nation.status {
-            submitted_status.push_str(&format!("{}\n", nation.submitted.show()));
+        if let NationStatus::Human = nation_details.status {
+            submitted_status.push_str(&format!("{}\n", nation_details.submitted.show()));
         } else {
             submitted_status.push_str(&format!("{}\n", SubmissionStatus::Submitted.show()));
         }
@@ -211,14 +192,14 @@ fn started_from_lobby_details<C: ServerConnection>(
         game_data
             .nations
             .iter()
-            .find(|ref nation| nation.id == nation_id)
+            .find(|ref nation_details| nation_details.nation.id == nation_id)
             .is_none()
     });
 
     for &(ref player, nation_id) in &not_uploaded_players {
         let &(nation_name, era) = Nations::get_nation_desc(nation_id);
         nation_names.push_str(&format!("{} {} ({})\n", era, nation_name, nation_id));
-        player_names.push_str(&format!("**{}**\n", player.discord_user_id.get()?));
+        player_names.push_str(&format!("{}\n", player.try_to_string()?));
         submitted_status.push_str(&format!("{}\n", SubmissionStatus::NotSubmitted.show()));
     }
 
@@ -245,7 +226,7 @@ fn started_from_lobby_details<C: ServerConnection>(
         submitted_status
     );
 
-    let owner = lobby_state.owner.get()?;
+    let owner = lobby_state.owner.to_user()?;
     let e_temp = CreateEmbed::default()
         .title(embed_title)
         .field("Nation", nation_names, true)
@@ -268,35 +249,35 @@ fn started_details<C: ServerConnection>(
     let mut game_data = C::get_game_data(&server_address)?;
     game_data
         .nations
-        .sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        .sort_unstable_by(|a, b| a.nation.name.cmp(&b.nation.name));
 
     let mut nation_names = String::new();
     let mut player_names = String::new();
     let mut submitted_status = String::new();
 
-    let id_player_nations = db_conn.players_with_nations_for_game_alias(&alias)?;
+    let id_player_nations = db_conn.players_with_nation_ids_for_game_alias(&alias)?;
 
-    for nation in &game_data.nations {
-        debug!("Creating format for nation {} {}", nation.era, nation.name);
-        nation_names.push_str(&format!("{} {} ({})\n", nation.era, nation.name, nation.id));
+    for nation_details in &game_data.nations {
+        debug!("Creating format for nation {}", nation_details.nation);
+        nation_names.push_str(&format!("{}\n", nation_details.nation));
 
-        let nation_string = if let NationStatus::Human = nation.status {
+        let nation_string = if let NationStatus::Human = nation_details.status {
             if let Some(&(ref player, _)) = id_player_nations
                 .iter()
-                .find(|&&(_, nation_id)| nation_id == nation.id)
+                .find(|&&(_, nation_id)| nation_id == nation_details.nation.id)
             {
-                format!("**{}**", player.discord_user_id.get()?)
+                player.try_to_string()?
             } else {
-                nation.status.show().to_string()
+                nation_details.status.show().to_string()
             }
         } else {
-            nation.status.show().to_string()
+            nation_details.status.show().to_string()
         };
 
         player_names.push_str(&format!("{}\n", nation_string));
 
-        if let NationStatus::Human = nation.status {
-            submitted_status.push_str(&format!("{}\n", nation.submitted.show()));
+        if let NationStatus::Human = nation_details.status {
+            submitted_status.push_str(&format!("{}\n", nation_details.submitted.show()));
         } else {
             submitted_status.push_str(&".\n");
         }
@@ -335,3 +316,69 @@ fn started_details<C: ServerConnection>(
         .field("Submitted", submitted_status, true);
     Ok(e)
 }
+
+fn players_nations_details<'a, 'b, I: Iterator<Item=(Player, Nation)>>(iter: &mut I, open_slots: i32) -> Result<(String, String), CommandError> {
+
+    let mut player_names = String::new();
+    let mut nation_names = String::new();
+
+    for (player, nation) in iter {
+        player_names.push_str(&player.try_to_string()?);
+        player_names.push('\n');
+        nation_names.push_str(&nation.to_string());
+        nation_names.push('\n');
+    }
+    for _ in 0..open_slots {
+        player_names.push_str(&".\n");
+        nation_names.push_str(&"OPEN\n");
+    }
+    Ok((player_names, nation_names))
+}
+
+fn game_details_embed<'a, 'b, I: Iterator<Item=(&'a Nation, Either<&'b Player, NationStatus>, Option<SubmissionStatus>)>>(iter: &mut I) -> Result<(String, String, String), CommandError> {
+    let mut nation_string = String::new();
+    let mut player_string = String::new();
+    let mut status_string = String::new();
+
+    for (nation, either_player_anon, option_status) in iter {
+        nation_string.push_str(&nation.to_string());
+        nation_string.push('\n');
+
+        player_string.push_str(
+            &match either_player_anon {
+                Either::Left(player) => Cow::Owned(player.try_to_string()?),
+                Either::Right(anon_status) => Cow::Borrowed(anon_status.show()),
+            }
+        );
+        player_string.push('\n');
+
+        status_string.push_str(
+            &match option_status {
+                Some(status) => status.show(),
+                None => Cow::Borrowed("."),
+            }
+        );
+        status_string.push('\n');
+    }
+    Ok((nation_string, player_string, status_string))
+}
+
+fn nation_list<'a, 'b>(
+    registered_nations: &'a [(Player, u32)],
+    uploaded_nations: &'b[NationDetails],
+) -> Vec<(&'b Nation, Option<&'a Player>, bool)> {
+
+    let mut players_uploaded_by_nation_id: HashMap<u32, &NationDetails> =
+        HashMap::with_capacity(20);
+    for nation_details in uploaded_nations {
+        let _ = players_uploaded_by_nation_id.insert(nation_details.nation.id, nation_details);
+    }
+
+    let players_not_uploaded = registered_nations
+        .iter()
+        .filter(|&&(_, nation_id)|
+            !players_uploaded_by_nation_id.contains_key(&nation_id)
+        );
+    panic!()
+}
+

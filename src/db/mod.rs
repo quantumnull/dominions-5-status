@@ -1,4 +1,3 @@
-use failure::{err_msg, Error};
 use r2d2_sqlite::SqliteConnectionManager;
 use r2d2::Pool;
 use serenity::model::id::UserId;
@@ -6,10 +5,9 @@ use typemap::Key;
 use num_traits::{FromPrimitive, ToPrimitive};
 
 use model::*;
-use model::enums::*;
 use std::path::Path;
 
-use failure::SyncFailure;
+use failure::*;
 
 use migrant_lib::{Settings, Config, Migrator, list, EmbeddedMigration, Migratable};
 
@@ -229,7 +227,23 @@ impl DbConnection {
     pub fn players_with_nations_for_game_alias(
         &self,
         game_alias: &str,
-    ) -> Result<Vec<(Player, usize)>, Error> {
+    ) -> Result<Vec<(Player, Nation)>, Error> {
+        let players_nation_ids = self.players_with_nation_ids_for_game_alias(game_alias)?;
+        let player_nations = players_nation_ids.into_iter().flat_map(
+            |(player, nation_id)| {
+                let nation_result = Nations::from_id(nation_id).ok_or(
+                    format_err!("Could not find nation {}", nation_id)
+                );
+                nation_result.map(|nation| (player, nation))
+            }
+        ).collect::<Vec<_>>();
+        Ok(player_nations)
+    }
+
+    pub fn players_with_nation_ids_for_game_alias(
+        &self,
+        game_alias: &str,
+    ) -> Result<Vec<(Player, u32)>, Error> {
         info!("players_with_nations_for_game_alias");
         let conn = &*self.0.clone().get()?;
         let mut stmt = conn.prepare(include_str!("sql/select_players_nations.sql"))?;
@@ -239,8 +253,8 @@ impl DbConnection {
                 discord_user_id: UserId(discord_user_id as u64),
                 turn_notifications: row.get(2),
             };
-            let nation: i32 = row.get(1);
-            (player, nation as usize)
+            let nation: u32 = row.get(1);
+            (player, nation)
         })?;
         let vec = foo.collect::<Result<Vec<_>, _>>()?;
         Ok(vec)
@@ -324,11 +338,11 @@ impl DbConnection {
             tx.commit()?;
             Ok(())
         } else {
-            Err(err_msg(format!("Could not find server with name {}", game_alias)))
+            Err(format_err!("Could not find server with name {}", game_alias))
         }
     }
 
-    pub fn servers_for_player(&self, user_id: UserId) -> Result<Vec<(GameServer, i32)>, Error> {
+    pub fn servers_for_player(&self, user_id: UserId) -> Result<Vec<(GameServer, u32)>, Error> {
         info!("servers_for_player");
         let conn = &*self.0.clone().get()?;
         let mut stmt = conn.prepare(include_str!("sql/select_servers_for_player.sql"))?;
@@ -351,11 +365,11 @@ impl DbConnection {
                 description,
             ).unwrap();
 
-            let nation_id = row.get(3);
+            let nation_id: u32 = row.get(3);
             (server, nation_id)
         })?;
 
-        let mut ret: Vec<(GameServer, i32)> = vec![];
+        let mut ret: Vec<(GameServer, u32)> = vec![];
         for pair in foo {
             ret.push(pair?);
         }
@@ -438,7 +452,7 @@ impl DbConnection {
         if rows_modified != 0 {
             Ok(())
         } else {
-            Err(err_msg(format!("Could not find lobby with name {}", alias)))
+            Err(format_err!("Could not find lobby with name {}", alias))
         }
     }
 }
@@ -488,7 +502,7 @@ fn make_game_server(
                 description: description,
             })
         }
-        _ => return Err(err_msg(format!("invalid db state for {}", alias))),
+        _ => return Err(format_err!("invalid db state for {}", alias)),
     };
 
     let server = GameServer {

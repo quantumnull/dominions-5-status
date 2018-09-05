@@ -5,94 +5,70 @@ use serenity::model::id::UserId;
 
 use server::ServerConnection;
 use model::{GameServerState, Player};
-use model::enums::*;
+use model::*;
 use db::{DbConnection, DbConnectionKey};
-use model::Nation as StartedServerNation;
+use model::NationDetails;
 use super::alias_from_arg_or_channel_name;
+use either::Either;
 
-fn get_nation_for_started_server(
-    option_arg_nation_name: Option<&str>, // should be an either
-    option_arg_nation_id: Option<u32>,
-    game_nations: &[StartedServerNation],
+fn get_nation_for_started_server<'a>(
+    nation_specifier: Either<&str, u32>,
+    game_nations: &'a [NationDetails],
     pre_game: bool
-) -> Result<Nation, CommandError> {
-    match (option_arg_nation_name, option_arg_nation_id) {
-        (Some(arg_nation_name), None) => {
+) -> Result<&'a NationDetails, CommandError> {
+    match nation_specifier {
+        Either::Left(arg_nation_name) => {
             // TODO: allow for players with registered nation but not ingame (not yet uploaded)
             let nations = game_nations
                 .iter()
-                .filter(|&nation| // TODO: more efficient algo
-                    nation.name.to_lowercase().starts_with(arg_nation_name))
-                .map ( |game_nation| {
-                    let game_nation_era =
-                        // if we can't parse the db era things are messed up
-                        Era::from_string(&game_nation.era).unwrap();
-                    Nation {
-                        id: game_nation.id as u32,
-                        name: game_nation.name.to_owned(),
-                        era: game_nation_era,
-                    }
-                })
+                .filter(|&nation_details| // TODO: more efficient algo
+                    nation_details.nation.name.to_lowercase().starts_with(arg_nation_name))
                 .collect::<Vec<_>>();
 
-            let nations_len = nations.len();
-            if nations_len > 1 {
-                return Err(CommandError::from(
+            match nations.len() {
+                0 => {
+                    let error = if pre_game {
+                        format!("Could not find nation starting with {}. Make sure you've uploaded a pretender first"
+                                , arg_nation_name)
+                    } else {
+                        format!("Could not find nation starting with {}", arg_nation_name)
+                    };
+                    Err(CommandError::from(error))
+                }
+                1 => Ok(nations[0]),
+                _ => Err(CommandError::from(
                     format!("ambiguous nation name: {}", arg_nation_name),
-                ));
-            } else if nations_len < 1 {
-                let error = if pre_game {
-                    format!("Could not find nation starting with {}. Make sure you've uploaded a pretender first"
-                            , arg_nation_name)
-                } else {
-                    format!("Could not find nation starting with {}", arg_nation_name)
-                };
-                return Err(CommandError::from(error));
-            };
-            Ok(nations[0].clone())
+                ))
+            }
         }
-        (None, Some(arg_nation_id)) => {
+        Either::Right(arg_nation_id) => {
             game_nations
                 .iter()
-                .find(|&nation| // TODO: more efficient algo
-                    nation.id as u32 == arg_nation_id)
-                .map ( |game_nation| {
-                    let game_nation_era =
-                    // if we can't parse the db era things are messed up
-                        Era::from_string(&game_nation.era).unwrap();
-                    Nation {
-                        id: game_nation.id as u32,
-                        name: game_nation.name.to_owned(),
-                        era: game_nation_era,
-                    }
-                })
+                .find(|&nation_details| // TODO: more efficient algo
+                    nation_details.nation.id == arg_nation_id)
                 .ok_or(CommandError::from(format!("Could not find a nation with id {}", arg_nation_id)))
         }
-        _ => Err(CommandError::from("Internal server error: get_nation_for_lobby malformed args")),
     }
 }
 
 fn get_nation_for_lobby(
-    option_arg_nation_name: Option<&str>, // should be an either
-    option_arg_nation_id: Option<u32>,
+    nation_specifier: Either<&str, u32>,
     era: Era,
 ) -> Result<Nation, CommandError> {
-    match (option_arg_nation_name, option_arg_nation_id) {
-        (Some(arg_nation_name), None) => {
+    match nation_specifier {
+        Either::Left(arg_nation_name) => {
             let nations = Nations::from_name_prefix(arg_nation_name, Some(era));
-            let nations_len = nations.len();
-            if nations_len > 1 {
-                return Err(CommandError::from(
-                    format!("ambiguous nation name: {}", arg_nation_name),
-                ));
-            } else if nations_len < 1 {
-                return Err(CommandError::from(
+            match nations.len() {
+                0 => Err(CommandError::from(
                     format!("could not find nation: {}", arg_nation_name),
-                ));
-            };
-            Ok(nations[0].clone())
+                )),
+                1 => Ok(nations[0].clone()),
+                _ => Err(CommandError::from(
+                    format!("ambiguous nation name: {}", arg_nation_name),
+                )),
+            }
         },
-        (None, Some(arg_nation_id)) => {
+        Either::Right(arg_nation_id) => {
             Nations::from_id(arg_nation_id)
                 .filter(|ref nation| nation.era == era)
                 .ok_or(CommandError::from(
@@ -101,14 +77,12 @@ fn get_nation_for_lobby(
                     )
                 ))
         },
-        _ => Err(CommandError::from("Internal server error: get_nation_for_lobby malformed args")),
     }
 }
 
 fn register_player_helper<C: ServerConnection>(
     user_id: UserId,
-    arg_nation_name: Option<&str>,
-    arg_nation_id: Option<u32>,
+    nation_specifier: Either<&str, u32>,
     alias: &str,
     db_conn: &DbConnection,
     message: &Message,
@@ -117,17 +91,17 @@ fn register_player_helper<C: ServerConnection>(
 
     match server.state {
         GameServerState::Lobby(lobby_state) => {
-            let players_nations = db_conn.players_with_nations_for_game_alias(&alias)?;
+            let players_nations = db_conn.players_with_nation_ids_for_game_alias(&alias)?;
             if players_nations.len() as i32 >= lobby_state.player_count {
                 return Err(CommandError::from("lobby already full"));
             };
 
-            let nation = get_nation_for_lobby(arg_nation_name, arg_nation_id, lobby_state.era)?;
+            let nation = get_nation_for_lobby(nation_specifier, lobby_state.era)?;
 
            if players_nations
                 .iter()
                 .find(|&&(_, player_nation_id)| {
-                    player_nation_id == nation.id as usize
+                    player_nation_id == nation.id
                 })
                 .is_some()
             {
@@ -149,19 +123,18 @@ fn register_player_helper<C: ServerConnection>(
                 nation.era,
                 nation.name,
                 nation.id,
-                user_id.get()?
+                user_id.to_user()?
             ))?;
             Ok(())
         }
         GameServerState::StartedState(started_state, _) => {
             let data = C::get_game_data(&started_state.address)?;
 
-            let nation = get_nation_for_started_server(
-                arg_nation_name,
-                arg_nation_id,
+            let ref nation = get_nation_for_started_server(
+                nation_specifier,
                 &data.nations[..],
                 data.turn == -1,
-            )?;
+            )?.nation;
             let player = Player {
                 discord_user_id: user_id,
                 turn_notifications: true,
@@ -198,8 +171,7 @@ pub fn register_player_id<C: ServerConnection>(
 
     register_player_helper::<C>(
         message.author.id,
-        None,
-        Some(arg_nation_id),
+        Either::Right(arg_nation_id),
         &alias,
         db_conn,
         message,
@@ -214,20 +186,13 @@ pub fn register_player<C: ServerConnection>(
 ) -> Result<(), CommandError> {
     let arg_nation_name: String = args.single_quoted::<String>()?.to_lowercase();
     let alias = alias_from_arg_or_channel_name(&mut args, &message)?;
-// FIXME: no idea why this isn't working
-//    if args.len() != 0 {
-//        return Err(CommandError::from(
-//            "Too many arguments. TIP: spaces in arguments need to be quoted \"like this\"",
-//        ));
-//    }
 
     let data = context.data.lock();
     let db_conn = data.get::<DbConnectionKey>().ok_or("no db connection")?;
 
     register_player_helper::<C>(
         message.author.id,
-        Some(&arg_nation_name),
-        None,
+        Either::Left(&arg_nation_name),
         &alias,
         db_conn,
         message,

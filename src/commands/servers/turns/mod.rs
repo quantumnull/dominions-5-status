@@ -5,8 +5,7 @@ use serenity::model::id::UserId;
 
 use server::ServerConnection;
 use db::*;
-use model::{GameServerState, Nation};
-use model::enums::*;
+use model::*;
 
 fn turns_helper<C: ServerConnection>(
     user_id: UserId,
@@ -20,12 +19,12 @@ fn turns_helper<C: ServerConnection>(
         // TODO: iflet macro crate
         if let GameServerState::StartedState(ref started_state, _) = server.state {
             if let Ok(game_data) = C::get_game_data(&started_state.address) {
-                if let Some(nation) = game_data
+                if let Some(nation_details) = game_data
                     .nations
                     .iter()
-                    .find(|&n| n.id == nation_id as usize)
+                    .find(|&n| n.nation.id == nation_id)
                 {
-                    if nation.status == NationStatus::Human {
+                    if nation_details.status == NationStatus::Human {
                         let (hours_remaining, mins_remaining) =
                             hours_mins_remaining(game_data.turn_timer);
                         let human_count = human_nations(&game_data.nations);
@@ -36,9 +35,9 @@ fn turns_helper<C: ServerConnection>(
                             game_data.turn,
                             hours_remaining,
                             mins_remaining,
-                            nation.name,
+                            nation_details.nation.name,
                             nation_id,
-                            nation.submitted.show(),
+                            nation_details.submitted.show(),
                             submitted_count,
                             human_count,
                         );
@@ -72,7 +71,7 @@ pub fn turns<C: ServerConnection>(
     Ok(())
 }
 
-fn human_nations(nations: &Vec<Nation>) -> i32 {
+fn human_nations(nations: &Vec<NationDetails>) -> i32 {
     nations.iter().fold(0, |t, i| {
         if i.status == NationStatus::Human {
             t + 1
@@ -82,7 +81,7 @@ fn human_nations(nations: &Vec<Nation>) -> i32 {
     })
 }
 
-fn submitted_nations(nations: &Vec<Nation>) -> i32 {
+fn submitted_nations(nations: &Vec<NationDetails>) -> i32 {
     nations.iter().fold(0, |t, i| {
         if i.submitted == SubmissionStatus::Submitted && i.status == NationStatus::Human {
             t + 1

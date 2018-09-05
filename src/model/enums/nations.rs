@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use model::enums::Era;
+use model::Nation;
 
 pub struct Nations;
 impl Nations {
-    pub fn get_nation_desc(n: usize) -> &'static NationEnum {
-        NATIONS_BY_ID.get(&(n as u32)).unwrap_or_else(|| {
+    pub fn get_nation_desc(n: u32) -> &'static NationEnum {
+        NATIONS_BY_ID.get(&n).unwrap_or_else(|| {
             info!("unknown nation {}", n);
             &("unknown nation", Era::Early) // FIXME
         })
@@ -12,7 +13,7 @@ impl Nations {
 
     pub fn from_id(id: u32) -> Option<Nation> {
         NATIONS_BY_ID.get(&id).map ({ |&(name, era)|
-            Nation { id, name: name.to_owned(), era }
+            Nation { id, name, era }
         })
     }
 
@@ -26,18 +27,12 @@ impl Nations {
                 };
                 era_correct && (name.to_owned().to_lowercase()).starts_with(name_prefix)
             }).map ({ |(&id, &(name, era))|
-                Nation { id, name: name.to_owned(), era }
+                Nation { id, name, era }
             })
             .collect::<Vec<_>>()
     }
 }
 
-#[derive(Clone)]
-pub struct Nation {
-    pub id: u32,
-    pub name: String, // Can be 'static str with refactoring
-    pub era: Era,
-}
 type NationEnum = (&'static str, Era);
 
 // TODO: actually make an enum

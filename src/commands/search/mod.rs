@@ -3,14 +3,9 @@ use url::percent_encoding::{utf8_percent_encode, QUERY_ENCODE_SET};
 use serenity::framework::standard::{Args, CommandError};
 use serenity::model::channel::Message;
 
-// enum InspectorCategoryV {Item, Spell, Unit, ...}
-
-// TODO: implement some kind of static enum macro or library
-// see https://users.rust-lang.org/t/enum-field-types-datasort-refinements/11323
 trait InspectorCategory: Copy {
     fn show() -> &'static str;
     fn event_append() -> &'static str;
-    // fn reify() -> InspectorCategoryV;
 }
 
 #[derive(Clone, Copy)]

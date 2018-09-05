@@ -5,7 +5,6 @@ use serenity::prelude::Context;
 use serenity::model::channel::Message;
 
 use model::*;
-use model::enums::Nations;
 use db::*;
 use super::alias_from_arg_or_channel_name;
 
@@ -54,7 +53,7 @@ pub fn start<C: ServerConnection>(
     }
     start_helper::<C>(db_conn, &address, &alias)?;
     message.reply(&"started!")?;
-    for (player, nation_id) in db_conn.players_with_nations_for_game_alias(&alias)? {
+    for (player, nation_id) in db_conn.players_with_nation_ids_for_game_alias(&alias)? {
         let &(name, era) = Nations::get_nation_desc(nation_id);
         let text = format!(
             "Pretender upload has started in {}.\nServer address is {}.\nYou are registered as {} {}",
